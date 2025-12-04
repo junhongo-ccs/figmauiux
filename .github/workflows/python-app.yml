@@ -1,0 +1,20 @@
+name: Python App テスト自動化
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Python をセットアップ
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    - name: 依存パッケージのインストール（必要な場合のみ）
+      run: |
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    - name: main.pyをテスト実行
+      run: |
+        python main.py
