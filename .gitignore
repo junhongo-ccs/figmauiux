@@ -31,5 +31,8 @@ ENV/
 .vscode/
 .idea/
 
+# Ruff cache
+.ruff_cache/
+
 # Generated
 report.md

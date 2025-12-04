@@ -146,4 +146,19 @@ A: データ量が多すぎる可能性があります。**フレーム単位**�
 
 このプロジェクトは Dev Container に対応しています。VS Code で開くと、必要な環境が自動的にセットアップされます。
 
+### コード品質
+
+**Ruff** を使用してコード品質を維持しています。
+
+```bash
+# コードチェック
+ruff check main.py
+
+# 自動修正
+ruff check --fix main.py
+
+# フォーマット
+ruff format main.py
+```
+
 詳細な実装ガイドラインは `.github/copilot-instructions.md` を参照してください。
