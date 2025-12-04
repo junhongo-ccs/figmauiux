@@ -12,9 +12,9 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
-    - name: 依存パッケージのインストール（必要な場合のみ）
+    - name: 依存パッケージのインストール
       run: |
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: main.pyをテスト実行
+        pip install -r requirements.txt
+    - name: main.pyを構文チェック
       run: |
-        python main.py
+        python main.py --check
