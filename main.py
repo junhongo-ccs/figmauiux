@@ -8,6 +8,14 @@ from typing import Any, Dict
 import requests
 from dotenv import load_dotenv
 import google.generativeai as genai
+import urllib3
+import ssl
+
+# SSL警告を抑制（企業ネットワーク環境用）
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# SSL検証を無効化（グローバル設定）
+ssl._create_default_https_context = ssl._create_unverified_context
 
 
 def load_env_vars() -> tuple[str, str]:
@@ -62,7 +70,7 @@ def fetch_figma_data(file_key: str, node_id: str, access_token: str) -> dict:
     print(f"Figma APIにリクエスト中... (file_key: {file_key}, node_id: {node_id})")
     
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, verify=False)
         
         if response.status_code != 200:
             print(f"エラー: Figma APIリクエストが失敗しました")
