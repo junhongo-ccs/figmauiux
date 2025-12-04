@@ -2,8 +2,10 @@
 Figma UI/UX Analysis Tool
 Figma APIからデザインデータを取得し、Gemini AIでUI/UX・アクセシビリティ分析を実施
 """
+import argparse
 import os
 import json
+import sys
 from typing import Any, Dict
 import requests
 from dotenv import load_dotenv
@@ -227,25 +229,37 @@ def main():
     """
     メイン実行処理
     """
+    parser = argparse.ArgumentParser(description="Figma UI/UX Analysis Tool")
+    parser.add_argument("--file-key", help="Figma File Key")
+    parser.add_argument("--node-id", help="Node ID")
+    parser.add_argument("--check", action="store_true", help="構文チェックのみを実行（CI用）")
+    args = parser.parse_args()
+    
+    # 構文チェックモード（CI用）
+    if args.check:
+        print("構文チェック完了")
+        return
+    
     print("=== Figma UI/UX Analysis Tool ===\n")
     
     # Step 1: 環境変数の読み込み
     figma_token, gemini_key = load_env_vars()
     print("環境変数の読み込みが完了しました\n")
     
-    # ユーザー入力（または定数で定義）
-    # コメントアウトを切り替えて使用方法を選択可能
+    # コマンドライン引数、環境変数、またはユーザー入力からfile_keyとnode_idを取得
+    file_key = args.file_key or os.getenv("FIGMA_FILE_KEY")
+    node_id = args.node_id or os.getenv("FIGMA_NODE_ID")
     
-    # 方法1: ユーザー入力
-    file_key = input("Figma File Key を入力してください: ").strip()
-    node_id = input("Node ID を入力してください: ").strip()
-    
-    # 方法2: 定数で定義（テスト用）
-    # file_key = "YOUR_FILE_KEY_HERE"
-    # node_id = "YOUR_NODE_ID_HERE"
+    # コマンドライン引数や環境変数が設定されていない場合はユーザー入力を求める
+    if not file_key and sys.stdin.isatty():
+        file_key = input("Figma File Key を入力してください: ").strip()
+    if not node_id and sys.stdin.isatty():
+        node_id = input("Node ID を入力してください: ").strip()
     
     if not file_key or not node_id:
         print("エラー: file_keyとnode_idを入力してください")
+        print("使用方法: python main.py --file-key <KEY> --node-id <ID>")
+        print("または環境変数 FIGMA_FILE_KEY と FIGMA_NODE_ID を設定してください")
         raise SystemExit(1)
     
     print()
