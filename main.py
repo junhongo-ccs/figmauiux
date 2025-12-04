@@ -168,7 +168,7 @@ def analyze_design_with_gemini(design_json: dict, api_key: str) -> str:
     """
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        model = genai.GenerativeModel("gemini-2.5-pro")
         
         # プロンプトの構築
         system_instruction = "あなたは熟練の UI/UX デザイナー兼アクセシビリティの専門家です。"
