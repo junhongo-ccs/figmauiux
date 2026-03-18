@@ -4,12 +4,14 @@ Figma APIからデザインデータを取得し、Gemini AIでUI/UX・アクセ
 """
 import os
 import json
+import pathlib
 from typing import Any, Dict
 import requests
 from dotenv import load_dotenv
 import google.generativeai as genai
 import urllib3
 import ssl
+import certifi
 
 # SSL警告を抑制（企業ネットワーク環境用）
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -17,10 +19,25 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # SSL検証を無効化（グローバル設定）
 ssl._create_default_https_context = ssl._create_unverified_context
 
-# 環境変数でSSL検証を無効化
+# Zscaler CA証明書 + certifiのバンドルを結合してすべてのHTTPSクライアントに適用
+_ZSCALER_CA = pathlib.Path.home() / "zscaler-ca.pem"
+_COMBINED_CA = pathlib.Path(__file__).parent / "_combined_ca.pem"
+
+def _build_combined_ca() -> str:
+    """Zscaler CA証明書をcertifiのバンドルに追加した結合ファイルを作成"""
+    certifi_bundle = pathlib.Path(certifi.where()).read_bytes()
+    zscaler_pem = _ZSCALER_CA.read_bytes() if _ZSCALER_CA.exists() else b""
+    _COMBINED_CA.write_bytes(certifi_bundle + b"\n" + zscaler_pem)
+    return str(_COMBINED_CA)
+
+_CA_BUNDLE = _build_combined_ca()
+
+# requests / urllib3 / gRPC すべてに同じCA束を適用
 os.environ['PYTHONHTTPSVERIFY'] = '0'
-os.environ['CURL_CA_BUNDLE'] = ''
-os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = _CA_BUNDLE
+os.environ['SSL_CERT_FILE'] = _CA_BUNDLE
+os.environ['CURL_CA_BUNDLE'] = _CA_BUNDLE
+os.environ['GRPC_DEFAULT_SSL_ROOTS_FILE_PATH'] = _CA_BUNDLE
 
 
 def load_env_vars() -> tuple[str, str]:
@@ -246,30 +263,14 @@ def simplify_node_data(node: Dict[str, Any]) -> Dict[str, Any]:
 
 def analyze_design_with_gemini(design_json: dict, api_key: str, contrast_issues: list[dict]) -> str:
     """
-    Gemini AIを使用してデザインデータを分析し、改善レポートを生成
+    Gemini REST APIを直接呼び出してデザインデータを分析し、改善レポートを生成。
+    google-generativeai SDKを使わずrequestsで直接呼び出すことでZscaler SSL問題を回避。
     コントラスト比はPythonで事前計算済みの値を渡す（LLMに推測させない）
-    
-    Args:
-        design_json: 軽量化されたFigmaデザインデータ
-        api_key: Gemini APIキー
-        contrast_issues: Python計算済みのWCAGコントラスト比リスト
-    
-    Returns:
-        str: Markdown形式の分析レポート
-    
-    Raises:
-        SystemExit: Gemini APIの呼び出しに失敗した場合
     """
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-pro")
-        
-        system_instruction = "あなたは熟練の UI/UX デザイナー兼アクセシビリティの専門家です。"
-        
-        design_json_str = json.dumps(design_json, indent=2, ensure_ascii=False)
-        contrast_json_str = json.dumps(contrast_issues, indent=2, ensure_ascii=False)
-        
-        user_prompt = f"""以下のFigmaデザインデータをJSON形式で提供します。このデータを分析し、UI/UXおよびアクセシビリティの観点から改善レポートをMarkdown形式で作成してください。
+    design_json_str = json.dumps(design_json, indent=2, ensure_ascii=False)
+    contrast_json_str = json.dumps(contrast_issues, indent=2, ensure_ascii=False)
+
+    prompt = f"""以下のFigmaデザインデータをJSON形式で提供します。このデータを分析し、UI/UXおよびアクセシビリティの観点から改善レポートをMarkdown形式で作成してください。
 
 # デザインデータ（JSON）
 ```json
@@ -299,25 +300,34 @@ def analyze_design_with_gemini(design_json: dict, api_key: str, contrast_issues:
 # 出力形式
 Markdown形式で、見出しや箇条書きを使って読みやすく構造化してください。
 """
-        
-        print("Gemini AIで分析中...")
-        print(f"プロンプトサイズ: {len(user_prompt)} 文字")
-        
-        response = model.generate_content(
-            [system_instruction, user_prompt],
-            generation_config=genai.GenerationConfig(
-                temperature=0,
-            )
-        )
-        
-        print("Gemini APIからレスポンスを受信しました")
-        
-        if not response.text:
-            print("エラー: Geminiからのレスポンスが空です")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    payload = {
+        "system_instruction": {"parts": [{"text": "あなたは熟練の UI/UX デザイナー兼アクセシビリティの専門家です。"}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0}
+    }
+
+    print("Gemini AIで分析中...")
+    print(f"プロンプトサイズ: {len(prompt)} 文字")
+
+    try:
+        response = requests.post(url, json=payload, verify=False, timeout=120)
+        if response.status_code != 200:
+            print(f"エラー: Gemini APIリクエストが失敗しました (status={response.status_code})")
+            print(response.text[:500])
             raise SystemExit(1)
-        
+
+        data = response.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+        print("Gemini APIからレスポンスを受信しました")
         print("分析が完了しました")
-        return response.text
+        return text
+
+    except requests.exceptions.RequestException as e:
+        print(f"エラー: Gemini API呼び出し中に例外が発生しました: {e}")
+        raise SystemExit(1)
         
     except Exception as e:
         print(f"エラー: Gemini API呼び出し中に例外が発生しました")
@@ -351,6 +361,9 @@ def main():
     if not file_key or not node_id:
         print("エラー: file_keyとnode_idを入力してください")
         raise SystemExit(1)
+    
+    # URLのハイフン区切り(1119-1553)をAPIのコロン区切り(1119:1553)に変換
+    node_id = node_id.replace("-", ":")
     
     print()
     
