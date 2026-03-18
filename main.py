@@ -105,6 +105,87 @@ def fetch_figma_data(file_key: str, node_id: str, access_token: str) -> dict:
         raise SystemExit(1)
 
 
+def get_solid_color(fills: list) -> tuple[float, float, float] | None:
+    """fillsリストから最初のSOLIDカラーのRGB(0-1)を返す"""
+    for fill in fills:
+        if fill.get("type") == "SOLID" and fill.get("visible", True):
+            c = fill.get("color", {})
+            r, g, b = c.get("r", 0), c.get("g", 0), c.get("b", 0)
+            return (r, g, b)
+    return None
+
+
+def linearize(c: float) -> float:
+    """sRGB値(0-1)を線形化（WCAG2.1準拠）"""
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def relative_luminance(r: float, g: float, b: float) -> float:
+    """WCAG2.1の相対輝度を計算"""
+    return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b)
+
+
+def contrast_ratio(color1: tuple, color2: tuple) -> float:
+    """2色間のWCAG2.1コントラスト比を計算（1〜21の範囲）"""
+    l1 = relative_luminance(*color1)
+    l2 = relative_luminance(*color2)
+    lighter, darker = max(l1, l2), min(l1, l2)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def wcag_level(ratio: float, font_size: float | None, font_weight: float | None) -> str:
+    """コントラスト比からWCAG達成レベルを判定"""
+    # ラージテキスト判定: 18pt(24px)以上 or 14pt(18.67px)以上かつBold
+    is_large = (font_size is not None and font_size >= 24) or \
+               (font_size is not None and font_size >= 18.67 and font_weight is not None and font_weight >= 700)
+    threshold_aa  = 3.0 if is_large else 4.5
+    threshold_aaa = 4.5 if is_large else 7.0
+    if ratio >= threshold_aaa:
+        return "AAA ✅"
+    elif ratio >= threshold_aa:
+        return "AA ✅"
+    else:
+        return "不合格 ❌"
+
+
+def collect_contrast_issues(node: Dict[str, Any], parent_bg: tuple | None = None) -> list[dict]:
+    """
+    ノードツリーを再帰的に走査し、TEXTノードのWCAGコントラスト比を計算して返す
+    """
+    issues = []
+    # このノード自身の背景色（SOLIDフィルがあれば更新）
+    bg = parent_bg
+    if node.get("fills"):
+        color = get_solid_color(node["fills"])
+        if color is not None:
+            bg = color
+
+    if node.get("type") == "TEXT" and bg is not None:
+        text_color = get_solid_color(node.get("fills", []))
+        if text_color is not None:
+            style = node.get("style", {})
+            font_size   = style.get("fontSize")
+            font_weight = style.get("fontWeight")
+            ratio = contrast_ratio(text_color, bg)
+            level = wcag_level(ratio, font_size, font_weight)
+            issues.append({
+                "name":       node.get("name", ""),
+                "text":       node.get("characters", "")[:40],
+                "font_size":  font_size,
+                "ratio":      round(ratio, 2),
+                "level":      level,
+                "text_color": "#{:02X}{:02X}{:02X}".format(
+                    int(text_color[0]*255), int(text_color[1]*255), int(text_color[2]*255)),
+                "bg_color":   "#{:02X}{:02X}{:02X}".format(
+                    int(bg[0]*255), int(bg[1]*255), int(bg[2]*255)),
+            })
+
+    for child in node.get("children", []):
+        issues.extend(collect_contrast_issues(child, bg))
+
+    return issues
+
+
 def simplify_node_data(node: Dict[str, Any]) -> Dict[str, Any]:
     """
     Figmaノードから必要な情報のみを抽出し、軽量化した辞書を作成
@@ -163,13 +244,15 @@ def simplify_node_data(node: Dict[str, Any]) -> Dict[str, Any]:
     return simplified
 
 
-def analyze_design_with_gemini(design_json: dict, api_key: str) -> str:
+def analyze_design_with_gemini(design_json: dict, api_key: str, contrast_issues: list[dict]) -> str:
     """
     Gemini AIを使用してデザインデータを分析し、改善レポートを生成
+    コントラスト比はPythonで事前計算済みの値を渡す（LLMに推測させない）
     
     Args:
         design_json: 軽量化されたFigmaデザインデータ
         api_key: Gemini APIキー
+        contrast_issues: Python計算済みのWCAGコントラスト比リスト
     
     Returns:
         str: Markdown形式の分析レポート
@@ -181,10 +264,10 @@ def analyze_design_with_gemini(design_json: dict, api_key: str) -> str:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-1.5-pro")
         
-        # プロンプトの構築
         system_instruction = "あなたは熟練の UI/UX デザイナー兼アクセシビリティの専門家です。"
         
         design_json_str = json.dumps(design_json, indent=2, ensure_ascii=False)
+        contrast_json_str = json.dumps(contrast_issues, indent=2, ensure_ascii=False)
         
         user_prompt = f"""以下のFigmaデザインデータをJSON形式で提供します。このデータを分析し、UI/UXおよびアクセシビリティの観点から改善レポートをMarkdown形式で作成してください。
 
@@ -193,10 +276,15 @@ def analyze_design_with_gemini(design_json: dict, api_key: str) -> str:
 {design_json_str}
 ```
 
+# コントラスト比（WCAG2.1準拠・Python計算済み・あなたが再計算する必要はありません）
+```json
+{contrast_json_str}
+```
+
 # 分析観点
 
 ## 1. アクセシビリティ
-- コントラスト比: 背景色と文字色のコントラストが低く、視認性に問題がありそうな箇所を指摘してください
+- コントラスト比: 上記の計算済みデータを使い、「不合格 ❌」の箇所のみ具体的に指摘してください。自分でコントラスト比を推測しないでください
 - フォントサイズ: 14px未満のテキストがある場合は警告してください
 - タッチターゲット: 幅または高さが44px未満の要素（ボタンやリンクなど）がある場合は警告してください
 
@@ -277,9 +365,16 @@ def main():
     simplified_json_str = json.dumps(simplified_data, ensure_ascii=False)
     print(f"軽量化データサイズ: {len(simplified_json_str)} 文字\n")
     
-    # Step 4: Gemini AIによる分析
+    # Step 3: WCAGコントラスト比をPythonで正確に計算
+    print("WCAGコントラスト比を計算中...")
+    contrast_issues = collect_contrast_issues(figma_node)
+    print(f"テキスト要素 {len(contrast_issues)} 件のコントラスト比を計算しました")
+    failures = [c for c in contrast_issues if "❌" in c["level"]]
+    print(f"  不合格: {len(failures)} 件 / AA以上: {len(contrast_issues) - len(failures)} 件\n")
+
+    # Step 4: Gemini AIによる分析（コントラスト計算済みデータを渡す）
     print("Gemini AIによる分析を開始します...")
-    report_markdown = analyze_design_with_gemini(simplified_data, gemini_key)
+    report_markdown = analyze_design_with_gemini(simplified_data, gemini_key, contrast_issues)
     print()
     
     # Step 5: レポートをファイルに保存
