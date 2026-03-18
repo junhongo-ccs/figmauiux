@@ -17,6 +17,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # SSL検証を無効化（グローバル設定）
 ssl._create_default_https_context = ssl._create_unverified_context
 
+# 環境変数でSSL検証を無効化
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+
 
 def load_env_vars() -> tuple[str, str]:
     """
@@ -208,6 +213,7 @@ Markdown形式で、見出しや箇条書きを使って読みやすく構造化
 """
         
         print("Gemini AIで分析中...")
+        print(f"プロンプトサイズ: {len(user_prompt)} 文字")
         
         response = model.generate_content(
             [system_instruction, user_prompt],
@@ -215,6 +221,8 @@ Markdown形式で、見出しや箇条書きを使って読みやすく構造化
                 temperature=0,
             )
         )
+        
+        print("Gemini APIからレスポンスを受信しました")
         
         if not response.text:
             print("エラー: Geminiからのレスポンスが空です")
@@ -261,13 +269,16 @@ def main():
     # Step 2: Figmaデータの取得
     figma_node = fetch_figma_data(file_key, node_id, figma_token)
     print()
-    
-    # Step 3: データの軽量化
     print("デザインデータを軽量化中...")
     simplified_data = simplify_node_data(figma_node)
-    print(f"軽量化完了 (元のキー数から必要な情報のみを抽出)\n")
+    print(f"軽量化完了 (元のキー数から必要な情報のみを抽出)")
+    
+    # デバッグ: 軽量化データのサイズを確認
+    simplified_json_str = json.dumps(simplified_data, ensure_ascii=False)
+    print(f"軽量化データサイズ: {len(simplified_json_str)} 文字\n")
     
     # Step 4: Gemini AIによる分析
+    print("Gemini AIによる分析を開始します...")
     report_markdown = analyze_design_with_gemini(simplified_data, gemini_key)
     print()
     
