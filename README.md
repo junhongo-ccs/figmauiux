@@ -30,7 +30,7 @@ cd figmauiux
 2. 必要なライブラリをインストール
 
 ```bash
-pip install requests google-generativeai python-dotenv
+pip install -r requirements.txt
 ```
 
 3. 環境変数を設定
@@ -51,6 +51,18 @@ GEMINI_API_KEY=your_gemini_api_key_here
 python main.py
 ```
 
+URL を直接指定して実行することもできます。
+
+```bash
+python main.py --figma-url "https://www.figma.com/design/...?...node-id=421-6"
+```
+
+Gemini を使わず、Pythonのみでベースレポートを出力する場合:
+
+```bash
+python main.py --figma-url "https://www.figma.com/design/...?...node-id=421-6" --skip-gemini
+```
+
 実行すると、以下の情報を入力するプロンプトが表示されます:
 
 - **Figma URL または Figma File Key**: Figmaの共有リンクをそのまま貼るか、`file_key` だけを入力します
@@ -59,7 +71,7 @@ python main.py
   - 全角コロン `：` を貼り付けても内部で半角 `:` に変換されます
   - `https://www.figma.com/design/...?...node-id=1-1099` のようなURLなら、`file_key` と `node_id` を自動抽出できます
 
-分析完了後、`report.md` ファイルが生成されます。
+分析完了後、既定では `report.md` ファイルが生成されます。`--output` で変更できます。
 
 ## ファイル構成
 
