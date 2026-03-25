@@ -53,8 +53,11 @@ python main.py
 
 実行すると、以下の情報を入力するプロンプトが表示されます:
 
-- **Figma File Key**: Figma ファイルの URL `https://www.figma.com/file/{file_key}/...` から取得
-- **Node ID**: 分析したいフレームやコンポーネントの ID（Figma で右クリック → "Copy/Paste as" → "Copy link" から取得可能）
+- **Figma URL または Figma File Key**: Figmaの共有リンクをそのまま貼るか、`file_key` だけを入力します
+- **Node ID または Figma URL**: 分析したいフレームやコンポーネントのリンク、または `node_id` だけを入力します
+  - `1:1099` と `1-1099` のどちらでも入力可能です
+  - 全角コロン `：` を貼り付けても内部で半角 `:` に変換されます
+  - `https://www.figma.com/design/...?...node-id=1-1099` のようなURLなら、`file_key` と `node_id` を自動抽出できます
 
 分析完了後、`report.md` ファイルが生成されます。
 

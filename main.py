@@ -5,6 +5,8 @@ Figma APIからデザインデータを取得し、Gemini AIでUI/UX・アクセ
 import os
 import json
 import pathlib
+import re
+from urllib.parse import parse_qs, urlparse
 from typing import Any, Dict
 import requests
 from dotenv import load_dotenv
@@ -64,6 +66,74 @@ def load_env_vars() -> tuple[str, str]:
         raise SystemExit(1)
     
     return figma_token, gemini_key
+
+
+def normalize_node_id(node_id: str) -> str:
+    """
+    FigmaのNode ID表記をAPI向けに正規化する
+
+    Args:
+        node_id: ユーザー入力またはURL由来のNode ID
+
+    Returns:
+        str: API呼び出しに使用できるNode ID
+    """
+    normalized = node_id.strip().replace("：", ":")
+    if "-" in normalized and ":" not in normalized:
+        normalized = normalized.replace("-", ":", 1)
+    return normalized
+
+
+def extract_figma_ids_from_url(figma_url: str) -> tuple[str | None, str | None]:
+    """
+    Figma URLからfile_keyとnode_idを抽出する
+
+    Args:
+        figma_url: Figmaの共有URL
+
+    Returns:
+        tuple[str | None, str | None]: (file_key, node_id)
+    """
+    parsed = urlparse(figma_url.strip())
+    if not parsed.netloc or "figma.com" not in parsed.netloc:
+        return None, None
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    file_key = None
+    if len(path_parts) >= 2 and path_parts[0] in {"design", "file"}:
+        file_key = path_parts[1]
+    elif len(path_parts) >= 3 and path_parts[0] == "proto":
+        file_key = path_parts[2]
+
+    query = parse_qs(parsed.query)
+    raw_node_id = query.get("node-id", [None])[0]
+    node_id = normalize_node_id(raw_node_id) if raw_node_id else None
+    return file_key, node_id
+
+
+def resolve_figma_input(raw_input: str) -> tuple[str | None, str | None]:
+    """
+    ユーザー入力からfile_keyとnode_idを解決する
+
+    Args:
+        raw_input: file_key / URL / node_id のいずれか
+
+    Returns:
+        tuple[str | None, str | None]: (file_key, node_id)
+    """
+    text = raw_input.strip()
+    if not text:
+        return None, None
+
+    file_key, node_id = extract_figma_ids_from_url(text)
+    if file_key or node_id:
+        return file_key, node_id
+
+    normalized = normalize_node_id(text)
+    if re.fullmatch(r"\d+:\d+", normalized):
+        return None, normalized
+
+    return text, None
 
 
 def fetch_figma_data(file_key: str, node_id: str, access_token: str) -> dict:
@@ -165,40 +235,144 @@ def wcag_level(ratio: float, font_size: float | None, font_weight: float | None)
         return "不合格 ❌"
 
 
-def collect_contrast_issues(node: Dict[str, Any], parent_bg: tuple | None = None) -> list[dict]:
+def get_bbox(node: Dict[str, Any]) -> tuple[float, float, float, float] | None:
+    """absoluteBoundingBox を (x1, y1, x2, y2) 形式で返す"""
+    bbox = node.get("absoluteBoundingBox")
+    if not bbox:
+        return None
+    x = bbox.get("x")
+    y = bbox.get("y")
+    w = bbox.get("width")
+    h = bbox.get("height")
+    if None in {x, y, w, h}:
+        return None
+    return (x, y, x + w, y + h)
+
+
+def bbox_contains_point(
+    bbox: tuple[float, float, float, float], point: tuple[float, float]
+) -> bool:
+    """矩形が点を含むか判定"""
+    x1, y1, x2, y2 = bbox
+    px, py = point
+    return x1 <= px <= x2 and y1 <= py <= y2
+
+
+def bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    """矩形面積を返す"""
+    x1, y1, x2, y2 = bbox
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+def flatten_scene_nodes(node: Dict[str, Any], depth: int = 0) -> list[dict]:
+    """ノードツリーを描画順に近い形でフラット化する"""
+    nodes = [{"node": node, "depth": depth}]
+    for child in node.get("children", []):
+        nodes.extend(flatten_scene_nodes(child, depth + 1))
+    return nodes
+
+
+def find_background_color(
+    text_entry: dict, painted_entries: list[dict]
+) -> tuple[float, float, float] | None:
+    """
+    テキスト背後の背景色を、座標と描画順から推定する
+
+    同じ親でなくても、背面にある塗りノードを候補にする。
+    """
+    bbox = get_bbox(text_entry["node"])
+    if not bbox:
+        return None
+
+    x1, y1, x2, y2 = bbox
+    center = ((x1 + x2) / 2, (y1 + y2) / 2)
+    candidates = []
+
+    for entry in painted_entries:
+        if entry["index"] >= text_entry["index"]:
+            continue
+
+        candidate_bbox = get_bbox(entry["node"])
+        if not candidate_bbox:
+            continue
+
+        if not bbox_contains_point(candidate_bbox, center):
+            continue
+
+        color = get_solid_color(entry["node"].get("fills", []))
+        if color is None:
+            continue
+
+        candidates.append(
+            {
+                "color": color,
+                "depth": entry["depth"],
+                "index": entry["index"],
+                "area": bbox_area(candidate_bbox),
+            }
+        )
+
+    if not candidates:
+        return None
+
+    # なるべく前面にあり、かつ面積が小さい背景を優先する
+    best = sorted(
+        candidates,
+        key=lambda item: (item["depth"], item["index"], -item["area"]),
+        reverse=True,
+    )[0]
+    return best["color"]
+
+
+def collect_contrast_issues(node: Dict[str, Any]) -> list[dict]:
     """
     ノードツリーを再帰的に走査し、TEXTノードのWCAGコントラスト比を計算して返す
     """
+    scene_entries = flatten_scene_nodes(node)
+    for index, entry in enumerate(scene_entries):
+        entry["index"] = index
+
+    painted_entries = [
+        entry
+        for entry in scene_entries
+        if entry["node"].get("type") != "TEXT"
+        and get_solid_color(entry["node"].get("fills", [])) is not None
+    ]
+
     issues = []
-    # このノード自身の背景色（SOLIDフィルがあれば更新）
-    bg = parent_bg
-    if node.get("fills"):
-        color = get_solid_color(node["fills"])
-        if color is not None:
-            bg = color
 
-    if node.get("type") == "TEXT" and bg is not None:
-        text_color = get_solid_color(node.get("fills", []))
-        if text_color is not None:
-            style = node.get("style", {})
-            font_size   = style.get("fontSize")
-            font_weight = style.get("fontWeight")
-            ratio = contrast_ratio(text_color, bg)
-            level = wcag_level(ratio, font_size, font_weight)
-            issues.append({
-                "name":       node.get("name", ""),
-                "text":       node.get("characters", "")[:40],
-                "font_size":  font_size,
-                "ratio":      round(ratio, 2),
-                "level":      level,
+    for entry in scene_entries:
+        current = entry["node"]
+        if current.get("type") != "TEXT":
+            continue
+
+        text_color = get_solid_color(current.get("fills", []))
+        bg = find_background_color(entry, painted_entries)
+        if text_color is None or bg is None:
+            continue
+
+        style = current.get("style", {})
+        font_size = style.get("fontSize")
+        font_weight = style.get("fontWeight")
+        ratio = contrast_ratio(text_color, bg)
+        level = wcag_level(ratio, font_size, font_weight)
+        issues.append(
+            {
+                "name": current.get("name", ""),
+                "text": current.get("characters", "")[:40],
+                "font_size": font_size,
+                "ratio": round(ratio, 2),
+                "level": level,
                 "text_color": "#{:02X}{:02X}{:02X}".format(
-                    int(text_color[0]*255), int(text_color[1]*255), int(text_color[2]*255)),
-                "bg_color":   "#{:02X}{:02X}{:02X}".format(
-                    int(bg[0]*255), int(bg[1]*255), int(bg[2]*255)),
-            })
-
-    for child in node.get("children", []):
-        issues.extend(collect_contrast_issues(child, bg))
+                    int(text_color[0] * 255),
+                    int(text_color[1] * 255),
+                    int(text_color[2] * 255),
+                ),
+                "bg_color": "#{:02X}{:02X}{:02X}".format(
+                    int(bg[0] * 255), int(bg[1] * 255), int(bg[2] * 255)
+                ),
+            }
+        )
 
     return issues
 
@@ -299,6 +473,14 @@ def analyze_design_with_gemini(design_json: dict, api_key: str, contrast_issues:
 
 # 出力形式
 Markdown形式で、見出しや箇条書きを使って読みやすく構造化してください。
+レポートの冒頭に必ず「WCAG 2.1 の基準」という凡例セクションを入れてください。
+凡例には以下をそのまま分かりやすく記載してください。
+
+## WCAG 2.1 の基準
+- 通常テキスト: コントラスト比 4.5:1 以上で AA
+- 大きい文字: 3.0:1 以上で AA
+- 通常テキストの AAA: 7.0:1 以上
+- 大きい文字の AAA: 4.5:1 以上
 """
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
@@ -347,23 +529,28 @@ def main():
     figma_token, gemini_key = load_env_vars()
     print("環境変数の読み込みが完了しました\n")
     
-    # ユーザー入力（または定数で定義）
-    # コメントアウトを切り替えて使用方法を選択可能
-    
-    # 方法1: ユーザー入力
-    file_key = input("Figma File Key を入力してください: ").strip()
-    node_id = input("Node ID を入力してください: ").strip()
-    
-    # 方法2: 定数で定義（テスト用）
-    # file_key = "YOUR_FILE_KEY_HERE"
-    # node_id = "YOUR_NODE_ID_HERE"
-    
+    first_input = input(
+        "Figma URL または File Key を入力してください: "
+    ).strip()
+    file_key, node_id = resolve_figma_input(first_input)
+
+    if file_key and node_id:
+        print("Figma URL から File Key と Node ID を自動取得しました")
+    else:
+        if not file_key:
+            file_key = input("Figma File Key を入力してください: ").strip()
+        if not node_id:
+            second_input = input("Node ID または Figma URL を入力してください: ").strip()
+            extra_file_key, extra_node_id = resolve_figma_input(second_input)
+            file_key = file_key or extra_file_key
+            node_id = extra_node_id
+
     if not file_key or not node_id:
         print("エラー: file_keyとnode_idを入力してください")
         raise SystemExit(1)
     
-    # URLのハイフン区切り(1119-1553)をAPIのコロン区切り(1119:1553)に変換
-    node_id = node_id.replace("-", ":")
+    # URLのハイフン区切りや全角コロンをAPIのNode ID形式に正規化
+    node_id = normalize_node_id(node_id)
     
     print()
     
